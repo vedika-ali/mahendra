@@ -23,8 +23,8 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance pandas numpy pandas-ta tabulate
-
+         pip install yfinance pandas numpy tabulate
+          pip install pandas-ta
       - name: Run Paper Trading Script
         run: |
           python scanner_script.py
