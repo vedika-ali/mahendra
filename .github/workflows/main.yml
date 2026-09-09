@@ -36,3 +36,7 @@ jobs:
         git add paper_trades.csv
         git diff --staged --quiet || git commit -m "Auto-update paper trades CSV [skip ci]"
         git push
+- name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install yfinance pandas numpy
