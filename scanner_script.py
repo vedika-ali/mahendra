@@ -1173,6 +1173,6 @@ def main():
             )
 
 
-if _name_ == "_main_":
+if _ _name_ _ == "_ _main_ _":
 
     main()
