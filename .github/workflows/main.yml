@@ -25,4 +25,4 @@ jobs:
           pip install yfinance pandas numpy tabulate pandas-ta
 
       - name: Run Script
-        run: python scanner_script.py
+       run: python scanner_script.py --paper
