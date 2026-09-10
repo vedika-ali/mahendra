@@ -17,12 +17,12 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: '3.11'
 
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install yfinance pandas numpy tabulate pandas-ta
+        pip install yfinance pandas numpy tabulate pandas_ta
 
     - name: Run Script
       run: python scanner_script.py
