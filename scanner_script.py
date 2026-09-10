@@ -2,8 +2,7 @@
 SMART NSE STOCK SCANNER + DAILY PAPER TRADING ENGINE
 """
 
-from _future_ import annotations
-
+from _ _future_ _ import annotations
 import argparse
 import math
 import os
