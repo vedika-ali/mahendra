@@ -5,8 +5,10 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
-schedule:
+  schedule:
     - cron: "0 13 * * 1-5"
+  workflow_dispatch:
+
 permissions:
   contents: write
 
@@ -34,7 +36,4 @@ jobs:
       - name: Save Paper Trades
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add paper_trades.csv
-          git commit -m "Update paper trades" || echo "No changes to commit"
-          git push
+          git c…
