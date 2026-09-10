@@ -2,27 +2,27 @@ name: Python CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    - name: Install Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install yfinance pandas numpy tabulate pandas_ta
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas numpy tabulate pandas-ta
 
-    - name: Run Script
-      run: python scanner_script.py
+      - name: Run Script
+        run: python scanner_script.py
