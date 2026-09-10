@@ -1,38 +1,32 @@
-name: Automated Stock Paper Trader
+name: Python CI
 
 on:
-  schedule:
-    - cron: '45 3 * * 1-5' # Mon-Fri at 9:15 AM IST
-  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
-  run-scanner:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    # 1. Checkout repository
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
+    # 2. Set up Python
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-         pip install yfinance pandas numpy tabulate
-          pip install pandas-ta
-      - name: Run Paper Trading Script
-        run: |
-          python scanner_script.py
+    # 3. Install Dependencies
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install yfinance pandas numpy tabulate pandas-ta
 
-      - name: Commit and Push Updated CSV
-        run: |
-          git config --global user.name "GitHub Actions Bot"
-          git config --global user.email "actions@github.com"
-          git add paper_trades.csv
-          git diff --staged --quiet || git commit -m "Auto-update paper trades CSV [skip ci]"
-          git push
+    # 4. Run Script
+    - name: Run Script
+      run: python scanner_script.py
