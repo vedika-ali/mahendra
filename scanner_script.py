@@ -360,7 +360,7 @@ def audit(trades: pd.DataFrame) -> dict:
         "Open Trades": int((trades["Status"].astype(str).str.upper() == "OPEN").sum()),
         "Wins": wins,
         "Losses": losses,
-        "Win Rate %": round(wins / len(returns) * 100, 2),
+        "Win Rate %": round(wins / len(returns) * 100, 2) if len(returns) > 0 else 0.0,
         "Total Return %": round(float(returns.sum()), 2),
         "Profit Factor": round(pf, 2) if math.isfinite(pf) else math.inf,
         "Max Drawdown %": round(float(drawdown.min()), 2),
