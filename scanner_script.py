@@ -2,17 +2,16 @@
 SMART NSE STOCK SCANNER + DAILY PAPER TRADING ENGINE  (fixed version)
 
 Run examples:
-    python nse_scanner.py                  # sirf scan
-    python nse_scanner.py --paper          # scan + paper trading update
-    python nse_scanner.py --stock TCS      # ek stock analyze
+    python scanner_script.py                  # sirf scan
+    python scanner_script.py --paper          # scan + paper trading update
+    python scanner_script.py --stock TCS      # ek stock analyze
 """
-
-from_ _future_ _import annotations
 
 import argparse
 import math
 import os
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -137,7 +136,7 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
 # --------------------------------------------------------------------------
 # SCANNER
 # --------------------------------------------------------------------------
-def analyze_stock(symbol: str) -> dict | None:
+def analyze_stock(symbol: str) -> Optional[dict]:
     df = download_history(symbol)
     if df.empty or len(df) < 60:
         return None
@@ -521,5 +520,4 @@ def main():
             print(f"{key}: {value}")
 
 
-if _name_ == "_main_":
-    main()
+main()
