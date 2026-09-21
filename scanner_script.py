@@ -1,8 +1,13 @@
 """
-SMART NSE STOCK SCANNER + DAILY PAPER TRADING ENGINE
+SMART NSE STOCK SCANNER + DAILY PAPER TRADING ENGINE  (fixed version)
+
+Run examples:
+    python nse_scanner.py                  # sirf scan
+    python nse_scanner.py --paper          # scan + paper trading update
+    python nse_scanner.py --stock TCS      # ek stock analyze
 """
 
-from __future__ import annotations
+from _future_ import annotations
 
 import argparse
 import math
@@ -13,6 +18,9 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+# --------------------------------------------------------------------------
+# CONFIG
+# --------------------------------------------------------------------------
 STOCKS = [
     "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK",
     "SBIN", "BHARTIARTL", "ITC", "LT", "TITAN",
@@ -24,16 +32,30 @@ SL_PCT = 1.50
 TARGET_PCT = 3.00
 MAX_HOLD_BARS = 20
 
+# True karne par SL/Target ATR se banenge (volatile stocks ke liye better)
+USE_ATR_STOPS = False
+ATR_SL_MULT = 1.5
+ATR_TARGET_MULT = 3.0
+
+# NSE 15:30 IST par band hota hai; data finalize hone ke liye 15 min buffer
+IST = "Asia/Kolkata"
+DATA_READY_TIME = (15, 45)
+
 RESULT_FILE = Path("MY_STOCK_SCANNER_RESULT.csv")
 PAPER_TRADES_FILE = Path("paper_trades.csv")
 
 TRADE_COLUMNS = [
     "Trade_ID", "Symbol", "Entry_Date", "Entry", "SL", "Target",
     "Status", "Exit_Date", "Exit_Price", "Bars_Held", "Result",
-    "Return_%", "MFE_%", "MAE_%"
+    "Return_%", "MFE_%", "MAE_%",
 ]
+TEXT_COLUMNS = ["Trade_ID", "Symbol", "Entry_Date", "Status", "Exit_Date", "Result"]
+NUM_COLUMNS = [c for c in TRADE_COLUMNS if c not in TEXT_COLUMNS]
 
 
+# --------------------------------------------------------------------------
+# DATA
+# --------------------------------------------------------------------------
 def normalize_symbol(symbol: str) -> str:
     symbol = str(symbol).strip().upper()
     return symbol if symbol.endswith(".NS") else symbol + ".NS"
@@ -48,6 +70,20 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def drop_incomplete_bar(df: pd.DataFrame) -> pd.DataFrame:
+    """Market chalu hai to aaj ki adhuri candle hata do."""
+    if df.empty:
+        return df
+
+    now = pd.Timestamp.now(tz=IST)
+    last_date = pd.Timestamp(df.index[-1]).date()
+    day_finished = (now.hour, now.minute) >= DATA_READY_TIME
+
+    if last_date == now.date() and not day_finished:
+        return df.iloc[:-1].copy()
+    return df
+
+
 def download_history(symbol: str, period: str = "1y") -> pd.DataFrame:
     df = yf.download(
         normalize_symbol(symbol),
@@ -59,21 +95,48 @@ def download_history(symbol: str, period: str = "1y") -> pd.DataFrame:
     )
     df = clean_columns(df)
 
-    required = {"Open", "High", "Low", "Close", "Volume"}
-    if df.empty or not required.issubset(df.columns):
+    required = ["Open", "High", "Low", "Close", "Volume"]
+    if df.empty or not set(required).issubset(df.columns):
         return pd.DataFrame()
 
-    return df.dropna(subset=list(required)).copy()
+    df = df.dropna(subset=required).copy()
+
+    # timezone hatao, warna entry_date se compare karte time error aata hai
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
+    return drop_incomplete_bar(df)
 
 
+# --------------------------------------------------------------------------
+# INDICATORS
+# --------------------------------------------------------------------------
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """Wilder RSI (TradingView jaisa)."""
     delta = close.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
     rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    out = 100 - (100 / (1 + rs))
+    # loss = 0 aur gain > 0 ho to RSI 100 hai
+    out = out.where(~((loss == 0) & (gain > 0)), 100.0)
+    return out
 
 
+def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+
+# --------------------------------------------------------------------------
+# SCANNER
+# --------------------------------------------------------------------------
 def analyze_stock(symbol: str) -> dict | None:
     df = download_history(symbol)
     if df.empty or len(df) < 60:
@@ -81,6 +144,7 @@ def analyze_stock(symbol: str) -> dict | None:
 
     close = pd.to_numeric(df["Close"], errors="coerce")
     high = pd.to_numeric(df["High"], errors="coerce")
+    low = pd.to_numeric(df["Low"], errors="coerce")
     volume = pd.to_numeric(df["Volume"], errors="coerce")
 
     ema9 = close.ewm(span=9, adjust=False).mean()
@@ -88,22 +152,24 @@ def analyze_stock(symbol: str) -> dict | None:
     ema50 = close.ewm(span=50, adjust=False).mean()
 
     rsi_now = float(rsi(close).iloc[-1])
+    atr_now = float(atr(high, low, close).iloc[-1])
 
-    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(
-        span=26, adjust=False
-    ).mean()
+    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
     macd_signal = macd.ewm(span=9, adjust=False).mean()
 
-    volume_avg20 = volume.rolling(20).mean()
+    # pichle 20 din ka average (aaj ka volume us average me shamil nahi)
+    volume_avg20 = volume.shift(1).rolling(20).mean()
 
     price = float(close.iloc[-1])
     e9 = float(ema9.iloc[-1])
     e20 = float(ema20.iloc[-1])
     e50 = float(ema50.iloc[-1])
-    vol_ratio = float(volume.iloc[-1] / volume_avg20.iloc[-1]) if volume_avg20.iloc[-1] > 0 else 0
+
+    avg_vol = volume_avg20.iloc[-1]
+    vol_ratio = float(volume.iloc[-1] / avg_vol) if pd.notna(avg_vol) and avg_vol > 0 else 0.0
 
     high_52w = float(high.tail(252).max())
-    low_52w = float(close.tail(252).min())
+    low_52w = float(low.tail(252).min())
 
     conditions = {
         "Price > EMA9": price > e9,
@@ -114,17 +180,9 @@ def analyze_stock(symbol: str) -> dict | None:
         "MACD > Signal": float(macd.iloc[-1]) > float(macd_signal.iloc[-1]),
         "Near 52W High": price >= high_52w * 0.98,
     }
-
     score = sum(conditions.values())
 
-    if score >= 6:
-        signal = "STRONG BUY"
-    elif score >= 4:
-        signal = "BUY"
-    elif score >= 2:
-        signal = "WATCH"
-    else:
-        signal = "AVOID"
+    bullish = price > e20 and e20 > e50
 
     if price > e20 and e20 > e50:
         trend = "Bullish"
@@ -132,6 +190,16 @@ def analyze_stock(symbol: str) -> dict | None:
         trend = "Bearish"
     else:
         trend = "Neutral"
+
+    # BUY tabhi jab trend bhi bullish ho (sirf score kaafi nahi)
+    if bullish and score >= 6:
+        signal = "STRONG BUY"
+    elif bullish and score >= 4:
+        signal = "BUY"
+    elif score >= 2:
+        signal = "WATCH"
+    else:
+        signal = "AVOID"
 
     return {
         "Stock": normalize_symbol(symbol).replace(".NS", ""),
@@ -141,6 +209,7 @@ def analyze_stock(symbol: str) -> dict | None:
         "EMA20": round(e20, 2),
         "EMA50": round(e50, 2),
         "RSI": round(rsi_now, 1),
+        "ATR": round(atr_now, 2),
         "Volume_Ratio": round(vol_ratio, 2),
         "52W_High": round(high_52w, 2),
         "52W_Low": round(low_52w, 2),
@@ -172,25 +241,41 @@ def run_scanner() -> pd.DataFrame:
     df["_order"] = df["Signal"].map(order).fillna(99)
     df = df.sort_values(
         ["_order", "Score", "RSI"],
-        ascending=[True, False, True]
+        ascending=[True, False, True],
     ).drop(columns="_order")
 
     df.to_csv(RESULT_FILE, index=False)
     return df
 
 
+# --------------------------------------------------------------------------
+# PAPER TRADES: LOAD / SAVE
+# --------------------------------------------------------------------------
+def coerce_trade_types(df: pd.DataFrame) -> pd.DataFrame:
+    """Text columns object rahen, number columns numeric (pandas dtype warning se bachne ke liye)."""
+    for col in TEXT_COLUMNS:
+        df[col] = df[col].fillna("").astype(object)
+    for col in NUM_COLUMNS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def load_trades() -> pd.DataFrame:
     if not PAPER_TRADES_FILE.exists():
-        return pd.DataFrame(columns=TRADE_COLUMNS)
+        return coerce_trade_types(pd.DataFrame(columns=TRADE_COLUMNS))
 
     try:
         df = pd.read_csv(PAPER_TRADES_FILE)
         for col in TRADE_COLUMNS:
             if col not in df.columns:
                 df[col] = np.nan
-        return df[TRADE_COLUMNS]
-    except Exception:
-        return pd.DataFrame(columns=TRADE_COLUMNS)
+        return coerce_trade_types(df[TRADE_COLUMNS].copy())
+    except Exception as exc:
+        # File kharab ho to chupchap khali mat karo, warna history overwrite ho jaayegi
+        backup = PAPER_TRADES_FILE.with_suffix(".corrupt.csv")
+        os.replace(PAPER_TRADES_FILE, backup)
+        print(f"paper_trades.csv padh nahi paaya ({exc}). Backup: {backup}")
+        return coerce_trade_types(pd.DataFrame(columns=TRADE_COLUMNS))
 
 
 def save_trades(df: pd.DataFrame) -> None:
@@ -203,11 +288,17 @@ def trade_id(symbol: str, date: str) -> str:
     return f"{symbol}_{date}"
 
 
+# --------------------------------------------------------------------------
+# PAPER TRADES: OPEN / UPDATE
+# --------------------------------------------------------------------------
 def open_new_trades(scanner: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame:
     if scanner.empty:
         return trades
 
     existing = set(trades["Trade_ID"].astype(str))
+    open_symbols = set(
+        trades.loc[trades["Status"].astype(str).str.upper() == "OPEN", "Symbol"].astype(str)
+    )
     new_rows = []
 
     for _, row in scanner.iterrows():
@@ -218,17 +309,27 @@ def open_new_trades(scanner: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame
         entry_date = str(row["Date"])
         tid = trade_id(symbol, entry_date)
 
-        if tid in existing:
+        # ek symbol ka ek hi OPEN trade
+        if symbol in open_symbols or tid in existing:
             continue
 
         entry = float(row["Price"])
+        atr_val = float(row["ATR"]) if pd.notna(row.get("ATR")) else np.nan
+
+        if USE_ATR_STOPS and pd.notna(atr_val) and atr_val > 0:
+            sl = entry - ATR_SL_MULT * atr_val
+            target = entry + ATR_TARGET_MULT * atr_val
+        else:
+            sl = entry * (1 - SL_PCT / 100)
+            target = entry * (1 + TARGET_PCT / 100)
+
         new_rows.append({
             "Trade_ID": tid,
             "Symbol": symbol,
             "Entry_Date": entry_date,
             "Entry": round(entry, 4),
-            "SL": round(entry * (1 - SL_PCT / 100), 4),
-            "Target": round(entry * (1 + TARGET_PCT / 100), 4),
+            "SL": round(sl, 4),
+            "Target": round(target, 4),
             "Status": "OPEN",
             "Exit_Date": "",
             "Exit_Price": np.nan,
@@ -239,9 +340,11 @@ def open_new_trades(scanner: pd.DataFrame, trades: pd.DataFrame) -> pd.DataFrame
             "MAE_%": 0.0,
         })
         existing.add(tid)
+        open_symbols.add(symbol)
 
     if new_rows:
-        trades = pd.concat([trades, pd.DataFrame(new_rows)], ignore_index=True)
+        new_df = coerce_trade_types(pd.DataFrame(new_rows, columns=TRADE_COLUMNS))
+        trades = new_df if trades.empty else pd.concat([trades, new_df], ignore_index=True)
 
     return trades
 
@@ -255,12 +358,12 @@ def update_open_trades(trades: pd.DataFrame) -> pd.DataFrame:
             continue
 
         try:
-            hist = download_history(str(trade["Symbol"]), "3mo")
+            hist = download_history(str(trade["Symbol"]), "6mo")
             if hist.empty:
                 continue
 
             entry_date = pd.Timestamp(trade["Entry_Date"])
-            future = hist.loc[hist.index > entry_date].copy()
+            future = hist.loc[hist.index > entry_date].head(MAX_HOLD_BARS)
 
             if future.empty:
                 continue
@@ -277,51 +380,47 @@ def update_open_trades(trades: pd.DataFrame) -> pd.DataFrame:
             exit_date = None
             bars = 0
 
-            for bars, (date, row) in enumerate(
-                future.head(MAX_HOLD_BARS).iterrows(), start=1
-            ):
-                high = float(row["High"])
-                low = float(row["Low"])
-                close = float(row["Close"])
+            for bars, (date, row) in enumerate(future.iterrows(), start=1):
+                o = float(row["Open"])
+                h = float(row["High"])
+                l = float(row["Low"])
 
-                mfe = max(mfe, (high / entry - 1) * 100)
-                mae = min(mae, (low / entry - 1) * 100)
+                mfe = max(mfe, (h / entry - 1) * 100)
+                mae = min(mae, (l / entry - 1) * 100)
 
-                hit_sl = low <= sl
-                hit_target = high >= target
+                # Order important hai:
+                # 1) gap-down SL ke neeche -> open par exit
+                # 2) intraday SL hit -> SL par exit (same candle me target bhi ho to SL pehle)
+                # 3) gap-up target ke upar -> open par exit
+                # 4) intraday target hit -> target par exit
+                if o <= sl:
+                    result, exit_price = "SL", o
+                elif l <= sl:
+                    result, exit_price = "SL", sl
+                elif o >= target:
+                    result, exit_price = "TARGET", o
+                elif h >= target:
+                    result, exit_price = "TARGET", target
 
-                # Conservative rule: if both are hit on same candle, SL first.
-                if hit_sl:
-                    result = "SL"
-                    exit_price = sl
-                    exit_date = date
-                    break
-
-                if hit_target:
-                    result = "TARGET"
-                    exit_price = target
+                if result is not None:
                     exit_date = date
                     break
 
             if result is None and len(future) >= MAX_HOLD_BARS:
-                last = future.head(MAX_HOLD_BARS).iloc[-1]
-                exit_price = float(last["Close"])
-                exit_date = future.head(MAX_HOLD_BARS).index[-1]
                 result = "TIME_EXIT"
-                bars = MAX_HOLD_BARS
+                exit_price = float(future["Close"].iloc[-1])
+                exit_date = future.index[-1]
+
+            trades.at[idx, "Bars_Held"] = int(bars)
+            trades.at[idx, "MFE_%"] = round(mfe, 4)
+            trades.at[idx, "MAE_%"] = round(mae, 4)
 
             if result is not None:
                 trades.at[idx, "Status"] = "CLOSED"
                 trades.at[idx, "Exit_Date"] = str(pd.Timestamp(exit_date).date())
                 trades.at[idx, "Exit_Price"] = round(float(exit_price), 4)
-                trades.at[idx, "Bars_Held"] = int(bars)
                 trades.at[idx, "Result"] = result
-                trades.at[idx, "Return_%"] = round(
-                    (float(exit_price) / entry - 1) * 100, 4
-                )
-
-            trades.at[idx, "MFE_%"] = round(mfe, 4)
-            trades.at[idx, "MAE_%"] = round(mae, 4)
+                trades.at[idx, "Return_%"] = round((float(exit_price) / entry - 1) * 100, 4)
 
         except Exception as exc:
             print("Trade update failed for", trade["Symbol"], ":", exc)
@@ -329,49 +428,72 @@ def update_open_trades(trades: pd.DataFrame) -> pd.DataFrame:
     return trades
 
 
+# --------------------------------------------------------------------------
+# AUDIT
+# --------------------------------------------------------------------------
 def audit(trades: pd.DataFrame) -> dict:
-    closed = trades[trades["Status"].astype(str).str.upper() == "CLOSED"].copy()
+    status = trades["Status"].astype(str).str.upper()
+    open_count = int((status == "OPEN").sum())
+    closed = trades[status == "CLOSED"].copy()
 
+    empty = {
+        "Closed Trades": 0,
+        "Open Trades": open_count,
+        "Wins": 0,
+        "Losses": 0,
+        "Win Rate %": 0.0,
+        "Avg Return %": 0.0,
+        "Total Return %": 0.0,
+        "Profit Factor": np.nan,
+        "Max Drawdown %": 0.0,
+    }
     if closed.empty:
-        return {
-            "Closed Trades": 0,
-            "Open Trades": int((trades["Status"].astype(str).str.upper() == "OPEN").sum()),
-            "Wins": 0,
-            "Losses": 0,
-            "Win Rate %": 0.0,
-            "Total Return %": 0.0,
-            "Profit Factor": np.nan,
-            "Max Drawdown %": 0.0,
-        }
+        return empty
 
+    # equity curve exit date ke order me banni chahiye
+    closed["_exit"] = pd.to_datetime(closed["Exit_Date"], errors="coerce")
+    closed = closed.sort_values("_exit")
     returns = pd.to_numeric(closed["Return_%"], errors="coerce").dropna()
+    if returns.empty:
+        return empty
+
     wins = int((returns > 0).sum())
     losses = int((returns <= 0).sum())
 
     gross_profit = float(returns[returns > 0].sum())
     gross_loss = float(abs(returns[returns < 0].sum()))
-    pf = gross_profit / gross_loss if gross_loss else math.inf
+    if gross_loss > 0:
+        pf = gross_profit / gross_loss
+    elif gross_profit > 0:
+        pf = math.inf
+    else:
+        pf = np.nan
 
-    equity = returns.cumsum()
-    drawdown = equity - equity.cummax()
+    # 0 se shuru karo, taaki shuru ke losses bhi drawdown me ginein
+    equity = np.concatenate([[0.0], returns.cumsum().to_numpy()])
+    drawdown = equity - np.maximum.accumulate(equity)
 
     return {
         "Closed Trades": len(returns),
-        "Open Trades": int((trades["Status"].astype(str).str.upper() == "OPEN").sum()),
+        "Open Trades": open_count,
         "Wins": wins,
         "Losses": losses,
-        "Win Rate %": round(wins / len(returns) * 100, 2) if len(returns) > 0 else 0.0,
+        "Win Rate %": round(wins / len(returns) * 100, 2),
+        "Avg Return %": round(float(returns.mean()), 2),
         "Total Return %": round(float(returns.sum()), 2),
-        "Profit Factor": round(pf, 2) if math.isfinite(pf) else math.inf,
+        "Profit Factor": round(pf, 2) if math.isfinite(pf) else pf,
         "Max Drawdown %": round(float(drawdown.min()), 2),
     }
 
 
+# --------------------------------------------------------------------------
+# MAIN
+# --------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stock", help="Analyze one NSE stock")
-    parser.add_argument("--scan", action="store_true")
-    parser.add_argument("--paper", action="store_true")
+    parser.add_argument("--scan", action="store_true", help="Sirf scan chalao (default)")
+    parser.add_argument("--paper", action="store_true", help="Scan + paper trading update")
     args = parser.parse_args()
 
     if args.stock:
@@ -390,8 +512,8 @@ def main():
 
     if args.paper:
         trades = load_trades()
-        trades = update_open_trades(trades)
-        trades = open_new_trades(scanner, trades)
+        trades = update_open_trades(trades)       # pehle purane trades close karo
+        trades = open_new_trades(scanner, trades)  # phir naye kholo
         save_trades(trades)
 
         print("\nPAPER TRADING AUDIT")
@@ -399,5 +521,5 @@ def main():
             print(f"{key}: {value}")
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     main()
