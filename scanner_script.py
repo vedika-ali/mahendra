@@ -7,7 +7,7 @@ Run examples:
     python nse_scanner.py --stock TCS      # ek stock analyze
 """
 
-from _future_ import annotations
+from_ _future_ _import annotations
 
 import argparse
 import math
